@@ -281,6 +281,7 @@ def get_relevant_examples(query: str, k: int = 3):
         return formatted_examples.strip()
     except Exception as e:
         print(f"Example retrieval failed: {e}")
+        traceback.print_exc()
         return ""
 
 async def generate_response(prompt_messages, user_input_text):
@@ -305,6 +306,8 @@ async def generate_response(prompt_messages, user_input_text):
             return
 
     try:
+        ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        print(f"Connecting to Ollama at: {ollama_base_url} with model: {MODEL_NAME}")
         llm_instance = get_llm()
         
         # Buffer to ensure sentence completion
@@ -329,8 +332,9 @@ async def generate_response(prompt_messages, user_input_text):
             yield buffer
                  
     except Exception as e:
-        print(f"Model generation failed: {e}")
-        yield "I apologize, but I am currently experiencing technical difficulties."
+        print(f"CRITICAL Model generation failed: {e}")
+        traceback.print_exc()
+        yield "I apologize, but I am currently experiencing technical difficulties. (Root cause: Connection to AI model failed)"
 
         yield "I apologize, but I am currently experiencing technical difficulties."
 
@@ -367,6 +371,7 @@ async def chat_endpoint(request: ChatRequest):
 
     print(f"--- Chat Request ---")
     print(f"User: {request.user_id}")
+    print(f"Prompt length: {len(combined_prompt)}")
     
     # Stream the response content directly to the client
     return StreamingResponse(generate_response(prompt_messages, user_query), media_type="text/plain")

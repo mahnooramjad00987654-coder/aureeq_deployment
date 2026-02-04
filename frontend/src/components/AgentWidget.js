@@ -274,11 +274,12 @@ export function setupAgentInteraction(avatarRenderer) {
       // but here we just pass text to backend which handles heavy lifting
       const context = await SalesAgent.assembleContext(text, user);
 
-      const res = await fetch(`${API_BASE_URL}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, user_id: user.email, context: context, user_metadata: user })
-      });
+      if (!res.ok) {
+        const errorText = await res.text();
+        contentEl.innerText = `Error: Backend returned ${res.status}. ${errorText}`;
+        console.error("Chat Request Failed:", res.status, errorText);
+        return;
+      }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -434,14 +435,15 @@ export function setupAgentInteraction(avatarRenderer) {
       }
 
       if (data.audio_url) {
-        console.log("Playing welcome audio:", data.audio_url);
-        const audio = new Audio(`${API_BASE_URL}${data.audio_url}`);
-        audio.play().catch(e => console.error("Auto-play failed:", e));
+        console.log("Playing welcome audio with lip-sync:", data.audio_url);
+        const fullWelcomeUrl = data.audio_url.startsWith('http') ? data.audio_url : `${API_BASE_URL}${data.audio_url}`;
 
-        // Lip-sync if avatar is present
         if (window.avatarFunctions && window.avatarFunctions.speakFromUrl) {
-          const fullWelcomeUrl = data.audio_url.startsWith('http') ? data.audio_url : `${API_BASE_URL}${data.audio_url}`;
           window.avatarFunctions.speakFromUrl(fullWelcomeUrl);
+        } else {
+          // Fallback if avatar not ready
+          const audio = new Audio(fullWelcomeUrl);
+          audio.play().catch(e => console.error("Auto-play failed:", e));
         }
       }
     } catch (e) {
