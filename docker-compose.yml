@@ -30,7 +30,7 @@ services:
       context: .
       dockerfile: frontend/Dockerfile
     ports:
-      - "80:5173" # Standard HTTP port for VPS deployment
+      - "5173:5173" # Port 5173 for local testing
     depends_on:
       - backend
 
