@@ -4,8 +4,7 @@ from fastapi import FastAPI, HTTPException, Body, Request
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from langchain_community.chat_models import ChatOllama
-from langchain_ollama import OllamaEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -172,10 +171,10 @@ def get_llm():
         model=MODEL_NAME, 
         base_url=ollama_base_url,
         keep_alive="24h",
-        num_ctx=8192,  # Increased for full menu + RAG context
-        num_predict=256,  # Increased allow for longer, more detailed responses
-        temperature=0.7,  # Balanced creativity and coherence
-        stop=["\n\nUser:", "USER:", "User:"]  # Stop at natural breaks to avoid mid-sentence cutoffs
+        timeout=300, # 5 min timeout for first token
+        num_ctx=8192,
+        temperature=0.7,
+        stop=["\n\nUser:", "USER:", "User:"]
     )
 
 # Data Models
@@ -365,15 +364,19 @@ async def generate_response(prompt_messages, user_input_text):
         print(f"Connecting to Ollama at: {ollama_base_url} with model: {MODEL_NAME}")
         llm_instance = get_llm()
         
+        # Use a timeout context if possible, or just rely on astreams's internal handling
         async for chunk in llm_instance.astream(prompt_messages):
-            if chunk.content:
-                print(f"DEBUG: Yielding chunk: {chunk.content[:20]}...")
+            if hasattr(chunk, 'content') and chunk.content:
                 yield chunk.content
+            elif isinstance(chunk, str):
+                yield chunk
                  
     except Exception as e:
         print(f"CRITICAL Model generation failed: {e}")
         traceback.print_exc()
-        yield "I apologize, but I am currently experiencing technical difficulties. (Root cause: Connection to AI model failed)"
+        # Only yield if we haven't already started sending the response
+        # In a StreamingResponse, this might still show up.
+        yield "\n\n[Connectivity issue: Please try again in a moment while the AI initializes.]"
 
 
 @app.post("/api/chat")
