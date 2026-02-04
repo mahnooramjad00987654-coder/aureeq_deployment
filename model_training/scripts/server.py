@@ -20,7 +20,7 @@ import re
 DB_DIR = "../vector_store"
 EXAMPLES_DB_DIR = "../vector_store_examples"
 SQLITE_PATH = "aureeq.db"
-MODEL_NAME = "llama3.2:3b"  # Switched from 8b to 3b for 5x faster response times
+MODEL_NAME = "llama3.2"  # Standard tag for 3B version
 
 app = FastAPI()
 
@@ -407,9 +407,9 @@ async def chat_endpoint(request: ChatRequest):
     print(f"--- Chat Request Received ---")
     print(f"Message: {user_query[:50]}...")
     
-    # Yield a space immediately to establish the stream and prevent browser timeout
+    # Stream the response content directly to the client
     async def chat_generator():
-        yield " " # Initial pulse
+        # NOTE: Removed initial space yield to avoid empty display bubbles in frontend trim
         
         # 1. RETRIEVE EXAMPLES (with timeout safety)
         print("Retrieving relevant sales examples...")
