@@ -123,22 +123,31 @@ except Exception as e:
 # --- Local Ollama Configuration ---
 
 # Startup Connectivity Check
-print(f"Checking Ollama connectivity at: {os.getenv('OLLAMA_HOST', 'http://localhost:11434')}")
-async def check_ollama():
-    try:
-        import httpx
-        ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(ollama_url)
-            if resp.status_code == 200:
-                print("✅ Successfully connected to Ollama!")
-            else:
-                print(f"⚠️ Ollama returned status {resp.status_code}")
-    except Exception as e:
-        print(f"❌ Failed to connect to Ollama: {e}")
-        print("💡 TIP: Make sure Ollama is RUNNING and Ollama is set to allow cross-origin requests.")
+async def check_ollama(retries=5):
+    ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+    print(f"Checking Ollama connectivity at: {ollama_url}")
+    import httpx
+    for i in range(retries):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(ollama_url)
+                if resp.status_code == 200:
+                    print("✅ Successfully connected to Ollama!")
+                    return True
+                else:
+                    print(f"⚠️ Ollama returned status {resp.status_code} (attempt {i+1})")
+        except Exception as e:
+            print(f"❌ Failed to connect to Ollama (attempt {i+1}): {e}")
+        
+        if i < retries - 1:
+            print("Waiting for Ollama to wake up...")
+            await asyncio.sleep(5)
+    return False
 
-asyncio.run(check_ollama())
+# Run connectivity check as part of the startup
+@app.on_event("startup")
+async def startup_event():
+    await check_ollama()
 
 def get_llm():
     """Factory to create Local LLM instance."""
