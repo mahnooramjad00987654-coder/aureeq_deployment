@@ -230,6 +230,24 @@ async def get_relevant_examples_async(query: str, k: int = 3):
         print(f"ERROR RAG: {e}")
         return ""
 
+# --- API Endpoints ---
+
+@app.post("/api/products/search")
+async def search_products(request: dict = Body(...)):
+    query = request.get("query", "").lower()
+    if not query: return {"results": []}
+    
+    results = []
+    lines = FULL_MENU_CONTEXT.split('\n')
+    for line in lines:
+        if query in line.lower() and ('£' in line or '€' in line or '$' in line):
+             results.append({"content": line, "metadata": {}})
+    return {"results": results[:5]}
+
+@app.post("/api/memory/search")
+async def search_memory(request: dict = Body(...)):
+    return {"results": []}
+
 @app.get("/api/dataHandler")
 async def data_handler(type: str, user_id: str = None):
     if type == "orders" and user_id:
