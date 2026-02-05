@@ -20,7 +20,7 @@ import re
 DB_DIR = "../vector_store"
 EXAMPLES_DB_DIR = "../vector_store_examples"
 SQLITE_PATH = "aureeq.db"
-MODEL_NAME = "llama3.1:8b"  # Reverted to 8B for high intelligence and strict rule following
+MODEL_NAME = "llama3.1:8b" 
 
 app = FastAPI()
 
@@ -66,18 +66,18 @@ def parse_menu_to_json(text):
                 
     return json.dumps(menu, indent=2, ensure_ascii=False)
 
-# 1. Setup Brain (Menu Injection)
+# 1. Setup Brain
 print("Loading Menu Data...")
 try:
     MENU_PATH = os.path.join(os.path.dirname(__file__), "../data/carnivore_menu.txt")
     with open(MENU_PATH, "r", encoding="utf-8") as f:
         raw_content = f.read()
         FULL_MENU_CONTEXT = parse_menu_to_json(raw_content)
-    print("Full Menu Parsed to JSON Successfully!")
+    print("Full Menu Parsed Successfully!")
 except Exception as e:
-    print(f"Error loading menu file: {e}")
+    print(f"Error loading menu: {e}")
     FULL_MENU_CONTEXT = "Menu data unavailable."
-    
+
 # Load Ingredients Data
 print("Loading Ingredients Data...")
 try:
@@ -86,23 +86,19 @@ try:
         with open(INGREDIENTS_PATH, "r", encoding="utf-8") as f:
             content = f.read()
             content = re.sub(r'\n\s*\n', '\n\n', content)
-            INGREDIENTS_CONTEXT = content
-        FULL_MENU_CONTEXT += "\n\nINGREDIENTS DATA:\n" + INGREDIENTS_CONTEXT
+            FULL_MENU_CONTEXT += "\n\nINGREDIENTS DATA:\n" + content
         print("Ingredients Loaded Successfully!")
 except Exception as e:
-    print(f"Error loading ingredients file: {e}")
+    print(f"Error loading ingredients: {e}")
 
 # Load Sales Examples Vector Store
 print("Loading Sales Examples Vector Store...")
 try:
     ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    embeddings = OllamaEmbeddings(
-        model="nomic-embed-text",
-        base_url=ollama_base_url
-    )
+    embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=ollama_base_url)
     if os.path.exists(EXAMPLES_DB_DIR):
         example_store = Chroma(persist_directory=EXAMPLES_DB_DIR, embedding_function=embeddings)
-        print(f"Sales Examples Store Loaded (Ollama: {ollama_base_url})")
+        print(f"Sales Examples Store Loaded")
     else:
         print("Sales Examples Store NOT FOUND.")
         example_store = None
@@ -110,11 +106,11 @@ except Exception as e:
     print(f"Error loading Example Store: {e}")
     example_store = None
 
-# Startup Connectivity Check & Model Verifier
+# Startup Connectivity Check
 async def verify_models(retries=5):
     ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
     import httpx
-    print(f"--- Production Startup: Checking Ollama at {ollama_url} ---")
+    print(f"Checking Ollama at {ollama_url}")
     for i in range(retries):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -125,7 +121,7 @@ async def verify_models(retries=5):
                     models = [m['name'] for m in list_resp.json().get('models', [])]
                     for required in [MODEL_NAME, "nomic-embed-text:latest"]:
                         if not any(required.split(':')[0] in m for m in models):
-                            print(f"⚠️ Model MISSING: {required}. Attempting background pull...")
+                            print(f"⚠️ Model MISSING: {required}")
                             await client.post(f"{ollama_url}/api/pull", json={"name": required}, timeout=1.0)
                         else:
                             print(f"✅ Model READY: {required}")
@@ -140,7 +136,6 @@ async def startup_event():
     asyncio.create_task(verify_models())
 
 def get_llm():
-    """Factory to create Local LLM instance."""
     ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     return ChatOllama(
         model=MODEL_NAME, 
@@ -153,14 +148,12 @@ def get_llm():
         stop=["\n\nUser:", "USER:", "User:"]
     )
 
-# Data Models
 class ChatRequest(BaseModel):
     message: str
     user_id: str = None
     user_metadata: dict = None
     context: str = None
 
-# Database Management
 def get_db_connection():
     conn = sqlite3.connect(SQLITE_PATH)
     conn.row_factory = sqlite3.Row
@@ -194,22 +187,6 @@ def save_order(user_id: str, items: list, total_price: float):
         return None
     finally: conn.close()
 
-async def get_relevant_examples_async(query: str, k: int = 3):
-    if not example_store: return ""
-    try:
-        import concurrent.futures
-        loop = asyncio.get_event_loop()
-        with concurrent.futures.ThreadPoolExecutor() as pool:
-             try:
-                 results = await asyncio.wait_for(loop.run_in_executor(pool, lambda: example_store.similarity_search(query, k=k)), timeout=10.0)
-                 return "\n\n".join([doc.metadata.get("full_example", doc.page_content) for doc in results]).strip()
-             except asyncio.TimeoutError:
-                 print("⚠️ RAG Timeout")
-                 return ""
-    except Exception as e:
-        print(f"ERROR RAG: {e}")
-        return ""
-
 # --- Chat Logic ---
 
 SYSTEM_PROMPT_TEMPLATE = """You are Aureeq, the formal and confident personal assistant for IYI restaurant.
@@ -238,6 +215,20 @@ USER INFO:
 REMEMBER: No casual apologies. Be formal, always recommend, and guide the guest to IYI's offerings."""
 
 async def get_relevant_examples_async(query: str, k: int = 3):
+    if not example_store: return ""
+    try:
+        import concurrent.futures
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+             try:
+                 results = await asyncio.wait_for(loop.run_in_executor(pool, lambda: example_store.similarity_search(query, k=k)), timeout=10.0)
+                 return "\n\n".join([doc.metadata.get("full_example", doc.page_content) for doc in results]).strip()
+             except asyncio.TimeoutError:
+                 print("⚠️ RAG Timeout")
+                 return ""
+    except Exception as e:
+        print(f"ERROR RAG: {e}")
+        return ""
 
 @app.get("/api/dataHandler")
 async def data_handler(type: str, user_id: str = None):
@@ -254,19 +245,12 @@ async def data_handler(type: str, user_id: str = None):
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     user_query = request.message
-    
     print(f"--- Chat Request: {user_query[:50]}... ---")
 
     async def chat_generator():
-        # Step 1: Establish immediate stream to prevent timeouts
         yield " " 
-        print("DEBUG: Pulse 1 sent")
-
         try:
-            # Step 2: Context Assembly & RAG
-            name = "Guest"
-            email = ""
-            user_info_str = ""
+            name, email, user_info_str = "Guest", "", ""
             if request.user_metadata:
                 name = request.user_metadata.get("name", "Guest")
                 email = request.user_metadata.get("email", "")
@@ -274,10 +258,8 @@ async def chat_endpoint(request: ChatRequest):
                 user_info_str = f"Name: {name}\nEmail: {email}\nPreferences: {request.user_metadata.get('preferences', '')}\n"
 
             relevant_examples = await get_relevant_examples_async(user_query, k=3)
-            yield " " # Pulse 2 (keep-alive during RAG wait)
-            print("DEBUG: RAG Step Finished")
+            yield " " 
 
-            # Step 3: Guardrails
             user_query_lower = user_query.lower()
             NON_FOOD_KEYWORDS = ["weather", "news", "coding", "programming", "joke", "politics"]
             if any(word in user_query_lower for word in NON_FOOD_KEYWORDS):
@@ -290,26 +272,13 @@ async def chat_endpoint(request: ChatRequest):
                     yield f"IYI doesn't offer {item} right now but you can have other options from our menu. I recommend our {pivot}!"
                     return
 
-            # Step 4: Generation
             final_system = SYSTEM_PROMPT_TEMPLATE.replace("{context}", FULL_MENU_CONTEXT)\
                                                .replace("{examples}", relevant_examples or "No examples available.")\
                                                .replace("{user_info}", user_info_str)
             
             prompt_messages = [("user", f"{final_system}\n\nUSER MESSAGE: {user_query}")]
             
-            # Final check before LLM call
-            ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-            import httpx
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                try:
-                    m_resp = await client.get(f"{ollama_url}/api/tags")
-                    m_list = [m['name'] for m in m_resp.json().get('models', [])]
-                    if not any(MODEL_NAME.split(':')[0] in m for m in m_list):
-                        yield f"\n[System: Aureeq is still preparing her knowledge ({MODEL_NAME}). Please try again in 1 minute.]"
-                        return
-                except Exception: pass # Non-critical if check fails
-
-            print(f"DEBUG: Invoking Model: {MODEL_NAME}")
+            # Connection Stabilizer
             llm = get_llm()
             has_started = False
             async for chunk in llm.astream(prompt_messages):
@@ -319,12 +288,11 @@ async def chat_endpoint(request: ChatRequest):
                     yield content
             
             if not has_started:
-                 yield "\n[System: The connection to the brain was interrupted. Please try again or refresh the page.]"
+                 yield "\n[System: The brain is currently initializing. Please try again.]"
 
         except Exception as e:
-            print(f"CRITICAL STREAM ERROR: {e}")
             traceback.print_exc()
-            yield f"\n\n[Connectivity issue: {str(e)[:50]}. Please try again.]"
+            yield f"\n\n[Connectivity issue: Please check back in a moment.]"
 
     return StreamingResponse(
         chat_generator(), 
