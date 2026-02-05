@@ -233,32 +233,49 @@ async def get_relevant_examples_async(query: str, k: int = 3):
 # --- API Endpoints ---
 
 @app.post("/api/products/search")
-async def search_products(request: dict = Body(...)):
-    query = request.get("query", "").lower()
+async def search_products(payload: dict = Body(...)):
+    query = payload.get("query", "").lower()
+    print(f"DEBUG: Product search for: {query}")
     if not query: return {"results": []}
     
     results = []
+    # Search in main menu
     lines = FULL_MENU_CONTEXT.split('\n')
     for line in lines:
         if query in line.lower() and ('£' in line or '€' in line or '$' in line):
-             results.append({"content": line, "metadata": {}})
+             results.append({"content": line, "metadata": {"source": "menu"}})
+    
+    # Also search in ingredients if relevant
+    if not results:
+        if "INGREDIENTS DATA:" in FULL_MENU_CONTEXT:
+            ing_data = FULL_MENU_CONTEXT.split("INGREDIENTS DATA:")[1]
+            for section in ing_data.split('\n\n'):
+                if query in section.lower():
+                    results.append({"content": section.strip(), "metadata": {"source": "ingredients"}})
+
+    print(f"DEBUG: Found {len(results)} matches")
     return {"results": results[:5]}
 
 @app.post("/api/memory/search")
-async def search_memory(request: dict = Body(...)):
+async def search_memory(payload: dict = Body(...)):
     return {"results": []}
 
 @app.get("/api/dataHandler")
 async def data_handler(type: str, user_id: str = None):
+    print(f"DEBUG: Data handler request: {type} for {user_id}")
     if type == "orders" and user_id:
         conn = get_db_connection()
         cursor = conn.cursor()
         try:
             cursor.execute("SELECT items, created_at, total_price FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 5", (user_id,))
             orders = cursor.fetchall()
-            return {"orders": [dict(o) for o in orders]}
+            order_list = [dict(o) for o in orders]
+            return {
+                "results": [{"content": f"Order from {o['created_at']}: {o['items']}", "metadata": {}} for o in order_list],
+                "orders": order_list
+            }
         finally: conn.close()
-    return {"error": "Invalid request"}
+    return {"results": [], "orders": [], "error": "Invalid request"}
 
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
@@ -266,7 +283,10 @@ async def chat_endpoint(request: ChatRequest):
     print(f"--- Chat Request: {user_query[:50]}... ---")
 
     async def chat_generator():
-        yield " " 
+        print("DEBUG: Chat generator started")
+        # Pulse 1: Immediate non-empty whitespace to tickle the frontend stream
+        yield "\n" 
+        
         try:
             name, email, user_info_str = "Guest", "", ""
             if request.user_metadata:
@@ -275,42 +295,53 @@ async def chat_endpoint(request: ChatRequest):
                 if email: sync_user(email, name)
                 user_info_str = f"Name: {name}\nEmail: {email}\nPreferences: {request.user_metadata.get('preferences', '')}\n"
 
+            print("DEBUG: Gathering context...")
             relevant_examples = await get_relevant_examples_async(user_query, k=3)
-            yield " " 
+            yield " " # Pulse 2 (keep connection alive during LLM prep)
 
             user_query_lower = user_query.lower()
             NON_FOOD_KEYWORDS = ["weather", "news", "coding", "programming", "joke", "politics"]
             if any(word in user_query_lower for word in NON_FOOD_KEYWORDS):
+                 print("DEBUG: Guardrail: Non-food item detected")
                  yield "I can't assist you with this. However, I highly recommend our Lamb Chops from the IYI menu."
                  return
 
             BANNED_ITEMS = {"sushi": "Lamb Chops", "pizza": "Lahmacun", "burger": "Chicken Adana"}
             for item, pivot in BANNED_ITEMS.items():
                 if item in user_query_lower:
+                    print(f"DEBUG: Guardrail: Banned item {item} detected")
                     yield f"IYI doesn't offer {item} right now but you can have other options from our menu. I recommend our {pivot}!"
                     return
 
-            final_system = SYSTEM_PROMPT_TEMPLATE.replace("{context}", FULL_MENU_CONTEXT)\
-                                               .replace("{examples}", relevant_examples or "No examples available.")\
-                                               .replace("{user_info}", user_info_str)
+            # Constructing cleaner messages for Ollama
+            messages = [
+                ("system", SYSTEM_PROMPT_TEMPLATE.replace("{context}", FULL_MENU_CONTEXT)
+                                               .replace("{examples}", relevant_examples or "No examples available.")
+                                               .replace("{user_info}", user_info_str)),
+                ("user", user_query)
+            ]
             
-            prompt_messages = [("user", f"{final_system}\n\nUSER MESSAGE: {user_query}")]
-            
-            # Connection Stabilizer
+            print(f"DEBUG: Invoking LLM: {MODEL_NAME}")
             llm = get_llm()
             has_started = False
-            async for chunk in llm.astream(prompt_messages):
+            async for chunk in llm.astream(messages):
                 content = getattr(chunk, 'content', chunk) if not isinstance(chunk, str) else chunk
                 if content:
-                    has_started = True
+                    if not has_started:
+                        print("DEBUG: LLM Streaming started")
+                        has_started = True
                     yield content
             
             if not has_started:
-                 yield "\n[System: The brain is currently initializing. Please try again.]"
+                 print("ERROR: LLM yielded no tokens")
+                 yield "\n[System: The brain is calculating. Please try saying 'Hello' to wake me up!]"
 
         except Exception as e:
+            print(f"CRITICAL STREAM ERROR: {str(e)}")
             traceback.print_exc()
-            yield f"\n\n[Connectivity issue: Please check back in a moment.]"
+            yield f"\n\n[Connectivity issue: {str(e)[:40]}]"
+        finally:
+            print("--- DEBUG: Stream Closed ---")
 
     return StreamingResponse(
         chat_generator(), 
