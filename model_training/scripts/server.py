@@ -40,7 +40,9 @@ def log(msg):
     sys.stdout.flush()
 
 def get_ollama_url():
-    url = os.getenv('OLLAMA_HOST', 'http://127.0.0.1:11434')
+    # Use environment variable for Ollama host (critical for Docker networking)
+    url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+    log(f"Configured Ollama URL: {url}")
     if '0.0.0.0' in url:
         url = url.replace('0.0.0.0', '127.0.0.1')
     if 'localhost' in url:

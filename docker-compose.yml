@@ -1,10 +1,22 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+
   backend:
     build:
       context: .
       dockerfile: model_training/scripts/Dockerfile
-    ports:
-      - "8001:8001"
     environment:
       - OLLAMA_HOST=http://ollama:11434
     depends_on:
@@ -17,22 +29,21 @@ services:
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
-    ports:
-      - "11434:11434"
-    environment:
-      - OLLAMA_HOST=0.0.0.0
-      - OLLAMA_ORIGINS=*
     volumes:
       - ollama_storage:/root/.ollama
+      - ./entrypoint.sh:/entrypoint.sh
+    entrypoint: ["/usr/bin/bash", "/entrypoint.sh"]
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
     ports:
-      - "5173:5173" # Port 5173 for local testing
+      - "5173:5173"
     depends_on:
       - backend
 
 volumes:
   ollama_storage:
+  caddy_data:
+  caddy_config:

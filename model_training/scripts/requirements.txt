@@ -9,3 +9,5 @@ requests
 pydantic
 chromadb
 httpx
+ollama
+netifaces

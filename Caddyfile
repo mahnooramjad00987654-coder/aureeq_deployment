@@ -1,0 +1,11 @@
+{
+    email mahnoor@kematconsulting.co.uk
+}
+
+aureeq.kamsoft.tech {
+    reverse_proxy frontend:5173
+}
+
+api.aureeq.kamsoft.tech {
+    reverse_proxy backend:8001
+}
