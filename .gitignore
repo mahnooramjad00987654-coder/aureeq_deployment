@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 venv/
+.venv/
 .env
 
 # Node
@@ -17,6 +18,10 @@ model_training/vector_store_examples/
 *.db
 *.sqlite
 data/orders.db
+model_training/data/*.mp3
+
+# Temporary / Debug
+debug_ollama.py
 
 # IDE
 .vscode/

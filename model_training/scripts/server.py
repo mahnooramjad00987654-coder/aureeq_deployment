@@ -19,7 +19,8 @@ import re
 DB_DIR = "../vector_store"
 EXAMPLES_DB_DIR = "../vector_store_examples"
 SQLITE_PATH = "aureeq.db"
-MODEL_NAME = "llama3.2:1b" 
+MODEL_FAST = "phi3"
+MODEL_REASONING = "llama3.2:1b" 
 
 app = FastAPI()
 
@@ -32,8 +33,23 @@ app.add_middleware(
 )
 
 def log(msg):
-    print(msg)
+    try:
+        print(msg.encode('ascii', 'replace').decode('ascii'))
+    except:
+        print(msg)
     sys.stdout.flush()
+
+def get_ollama_url():
+    url = os.getenv('OLLAMA_HOST', 'http://127.0.0.1:11434')
+    if '0.0.0.0' in url:
+        url = url.replace('0.0.0.0', '127.0.0.1')
+    if 'localhost' in url:
+        url = url.replace('localhost', '127.0.0.1')
+    if not url.startswith('http'):
+        url = f"http://{url}"
+    if ':11434' not in url:
+        url = f"{url}:11434"
+    return url
 
 def parse_menu_to_json(text):
     """Parses markdown menu into a structured JSON tree."""
@@ -96,7 +112,7 @@ except Exception as e:
 # Load Sales Examples Vector Store
 log("Loading Sales Examples Vector Store...")
 try:
-    ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    ollama_base_url = get_ollama_url()
     embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=ollama_base_url)
     if os.path.exists(EXAMPLES_DB_DIR):
         example_store = Chroma(persist_directory=EXAMPLES_DB_DIR, embedding_function=embeddings)
@@ -110,7 +126,7 @@ except Exception as e:
 
 # Startup Connectivity Check
 async def verify_models(retries=5):
-    ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
+    ollama_url = get_ollama_url()
     import httpx
     log(f"Checking Ollama at {ollama_url}")
     for i in range(retries):
@@ -121,7 +137,7 @@ async def verify_models(retries=5):
                     log("✅ Ollama Service: Online")
                     list_resp = await client.get(f"{ollama_url}/api/tags")
                     models = [m['name'] for m in list_resp.json().get('models', [])]
-                    for required in [MODEL_NAME, "nomic-embed-text:latest"]:
+                    for required in [MODEL_FAST, MODEL_REASONING, "nomic-embed-text:latest"]:
                         found = False
                         for m in models:
                             if required.split(':')[0] in m:
@@ -140,12 +156,13 @@ async def verify_models(retries=5):
 
 @app.on_event("startup")
 async def startup_event():
+    init_db()
     asyncio.create_task(verify_models())
 
-def get_llm():
-    ollama_base_url = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+def get_llm(model_name):
+    ollama_base_url = get_ollama_url()
     return ChatOllama(
-        model=MODEL_NAME, 
+        model=model_name, 
         base_url=ollama_base_url,
         keep_alive="24h",
         timeout=600,
@@ -164,6 +181,29 @@ def get_db_connection():
     conn = sqlite3.connect(SQLITE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            email TEXT PRIMARY KEY,
+            name TEXT,
+            preferences TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            user_id TEXT,
+            items TEXT,
+            total_price REAL,
+            status TEXT,
+            created_at TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
 
 def sync_user(email: str, name: str = None, preferences: str = None):
     conn = get_db_connection()
@@ -195,43 +235,57 @@ def save_order(user_id: str, items: list, total_price: float):
 
 # --- Chat Logic ---
 
-SYSTEM_PROMPT_TEMPLATE = """You are Aureeq, the formal assistant for IYI restaurant. 
+# --- Router Logic ---
 
+PROMPT_FAST = """You are Aureeq, the personal food assistant for IYI restaurant.
+ROLE: Handle simple queries, menu lookups, and orders. NO reasoning. NO examples.
 STRICT RULES:
-1. **CONCISE**: Every response MUST be 1-2 sentences maximum.
-2. **PERSONAL**: Always call the user by their name: {user_name}. Use "Hello {user_name}" or "Hi {user_name}".
-3. **EXACT**: Copy dish names, prices, and descriptions exactly from MENU DATA.
-4. **RECOMMEND**: Always suggest one dish from the menu in every response.
-5. **TAG**: ONLY append [ORDER: Exact Dish Name | Price] if the user says "add to cart" or "yes" to your offer.
-6. **NON-FOOD**: If asked about anything not related to IYI or food, ONLY say: "I am only trained on your food selection. However, I highly recommend our [Dish Name] from the IYI menu."
-7. **OFF-MENU**: If a food item is not in the list, say: "IYI doesn't offer it right now but you can have other options. I recommend our [Similar Dish]!"
+1. USE MENU DATA ONLY. If item is not in menu, say: "Sorry, we don't offer that item at the moment, but you can explore our other options."
+2. EXACTNESS: Use exact names and prices from menu.
+3. BREVITY: Max 1-2 sentences.
+4. TONE: Friendly and direct. "Hello {user_name}..."
+5. TAGGING: ONLY append [ORDER: Item Name | Price] if user EXPLICITLY says "add to cart", "order this", or "buy". NEVER use for suggestions.
+6. CONTEXT: Name: {user_name}. Preferences: {user_preferences}.
 
-FEW-SHOT EXAMPLES:
-User: hello
-Aureeq: Hello {user_name}, I am Aureeq from IYI. I highly recommend our Ranjha Gosht (£19.99) which is a rich lamb curry.
+MENU DATA:
+{context}
+"""
 
-User: add to cart lamb chops
-Aureeq: Certainly {user_name}, I have successfully added the Lamb Chops (£25.99) to your cart. [ORDER: Lamb Chops | £25.99]
-
-User: can i have ranjha gosht?
-Aureeq: Excellent choice {user_name}! I have added the Ranjha Gosht (£19.99) to your cart. [ORDER: Ranjha Gosht | £19.99]
-
-User: yes please
-Aureeq: Certainly {user_name}, I have added that to your cart for you. [ORDER: Lamb Chops | £25.99]
-
-User: do you have pizza?
-Aureeq: IYI doesn't offer it right now but you can have other options. I recommend our Lahmacun (£6.99) which is a crisp flatbread with minced meat.
-
-User: what is the weather?
-Aureeq: I am only trained on your food selection. However, I highly recommend our Chicken Adana Kebab (£15.99) from the IYI menu.
+PROMPT_REASONING = """You are Aureeq, the personal food assistant for IYI restaurant.
+ROLE: Provide recommendations and handle choices. Light reasoning allowed.
+STRICT RULES:
+1. USE MENU DATA. Do not invent items.
+2. RECOMMEND: Suggest ONE item based on user request.
+3. STYLE: Use the provided EXAMPLE as style guidance only. Do NOT copy it.
+4. ONE RESPONSE: Max 2-3 sentences.
+5. NO ORDER TAGS: Do NOT generate [ORDER: ...] tags. Ask for confirmation first.
+6. CONTEXT: Name: {user_name}. Preferences: {user_preferences}.
 
 MENU DATA:
 {context}
 
-USER INFO:
-Name: {user_name}
-Preferences: {user_preferences}
+EXAMPLE STYLE (Do not copy contents, only tone):
+{examples}
 """
+
+def route_query(text):
+    text = text.lower()
+    
+    # 1. Guardrails (Non-food) - Return "reject"
+    non_food = ["weather", "news", "coding", "programming", "politics", "joke"]
+    if any(w in text for w in non_food):
+        return "reject"
+
+    # 2. Reasoning / Recommendations -> Llama
+    reasoning_keywords = [
+        "recommend", "suggest", "best", "what should i", "choose",
+        "sweet", "spicy", "light", "heavy", "drink", "dessert", "main", "something"
+    ]
+    if any(w in text for w in reasoning_keywords):
+        return "reasoning"
+
+    # 3. Default -> Fast (Greetings, Menu, Order, Hunger)
+    return "fast"
 
 async def get_relevant_examples_async(query: str, k: int = 3):
     if not example_store: return ""
@@ -282,84 +336,79 @@ async def chat_endpoint(request: ChatRequest):
     log(f"--- Chat Request: {user_query} ---")
 
     async def chat_generator():
-        log("DEBUG: Chat generator EXECUTION START")
-        yield " " 
+        # Yield Zero-Width Space to keep connection open without visible text
+        yield "\u200B"
         
         try:
+            # 1. User Context
             name = "Guest"
             preferences = ""
             if request.user_metadata:
                 name = request.user_metadata.get("name", "Guest")
                 preferences = request.user_metadata.get("preferences", "")
-                email = request.user_metadata.get("email", "")
-                if email: sync_user(email, name, preferences)
+                if request.user_metadata.get("email"): 
+                    sync_user(request.user_metadata["email"], name, preferences)
 
-            log("DEBUG: Getting examples...")
-            relevant_examples = await get_relevant_examples_async(user_query, k=2)
+            # 2. Routing
+            route = route_query(user_query)
+            log(f"DEBUG: Router decided: {route.upper()}")
 
-            user_query_lower = user_query.lower()
-            NON_FOOD_KEYWORDS = ["weather", "news", "coding", "programming", "joke", "politics"]
-            if any(word in user_query_lower for word in NON_FOOD_KEYWORDS):
-                 log("DEBUG: Guardrail Hit")
-                 yield "I am only trained on your food selection. However, I highly recommend our Lamb Chops (£25.99) from the IYI menu."
-                 return
+            if route == "reject":
+                yield "I am only trained to help you with food and menu selections."
+                return
 
-            final_system = SYSTEM_PROMPT_TEMPLATE.replace("{context}", FULL_MENU_CONTEXT)\
-                                               .replace("{user_name}", name)\
-                                               .replace("{user_preferences}", preferences or "None")
+            model_to_use = MODEL_FAST
+            prompt = ""
             
-            if relevant_examples:
-                final_system += f"\n\nFAVORITE EXAMPLES:\n{relevant_examples}"
-
-            prompt = f"{final_system}\n\nUser: {user_query}\nAureeq: "
+            if route == "fast":
+                model_to_use = MODEL_FAST
+                system = PROMPT_FAST.replace("{context}", FULL_MENU_CONTEXT)\
+                                    .replace("{user_name}", name)\
+                                    .replace("{user_preferences}", preferences)
+                prompt = f"{system}\n\nUser: {user_query}\nAureeq: "
             
-            log(f"DEBUG: Invoking Ollama /api/generate...")
+            else: # reasoning
+                model_to_use = MODEL_REASONING
+                # Fetch MAX 1 example
+                example_text = await get_relevant_examples_async(user_query, k=1)
+                system = PROMPT_REASONING.replace("{context}", FULL_MENU_CONTEXT)\
+                                         .replace("{user_name}", name)\
+                                         .replace("{user_preferences}", preferences)\
+                                         .replace("{examples}", example_text or "No examples.")
+                prompt = f"{system}\n\nUser: {user_query}\nAureeq: "
+
+            # 3. Generation
+            log(f"DEBUG: Invoking {model_to_use}...")
+            # ollama_url = get_ollama_url()
+            ollama_url = "http://127.0.0.1:11434"
             import httpx
-            ollama_url = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
             
-            async with httpx.AsyncClient(timeout=600.0) as client:
+            async with httpx.AsyncClient(timeout=600.0, trust_env=False) as client:
                 async with client.stream("POST", f"{ollama_url}/api/generate", json={
-                    "model": MODEL_NAME,
+                    "model": model_to_use,
+                    "prompt": prompt,
                     "prompt": prompt,
                     "stream": True,
+                    "keep_alive": "24h",
                     "options": {"temperature": 0.3}
                 }) as response:
                     if response.status_code != 200:
-                         log(f"ERROR: Ollama returned {response.status_code}")
-                         yield f"\n[Brain error: {response.status_code}]"
-                         return
-                    
-                    has_tokens = False
+                        yield f"[Error: {response.status_code}]"
+                        return
+
                     async for line in response.aiter_lines():
                         if not line: continue
                         try:
                             chunk = json.loads(line)
-                            if "error" in chunk:
-                                yield f"\n[Brain error: {chunk['error']}]"
-                                break
-                            
+                            if "error" in chunk: break
                             content = chunk.get("response")
-                            if content:
-                                if not has_tokens:
-                                    log("DEBUG: First REAL token received!")
-                                    has_tokens = True
-                                yield content
-                            if chunk.get("done"):
-                                log(f"DEBUG: Ollama done. Total tokens received: {has_tokens}")
-                                break
+                            if content: yield content
+                            if chunk.get("done"): break
                         except Exception as e:
-                            log(f"Chunk error: {e} | Line: {line}")
-                    
-                    if not has_tokens:
-                         log("ERROR: No content received from Ollama")
-                         yield "\n[The brain is warming up. Please try again in 30 seconds.]"
-
+                            log(f"Chunk parsing error: {e} in line: {line}")
         except Exception as e:
-            log(f"CRITICAL ERROR: {str(e)}")
-            traceback.print_exc()
-            yield f"\n[Connection error: {str(e)[:40]}]"
-        finally:
-            log("--- DEBUG: Chat generator CLOSED ---")
+            log(f"CRITICAL ERROR: {e}")
+            yield f"[Error: {str(e)[:40]}]"
 
     return StreamingResponse(
         chat_generator(), 

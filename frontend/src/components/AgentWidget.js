@@ -293,25 +293,34 @@ export function setupAgentInteraction(avatarRenderer) {
       let fullText = "";
       try {
         const reader = res.body.getReader();
-        const decoder = new TextDecoder();
+        const decoder = new TextDecoder("utf-8");
         let hasTokens = false;
 
         while (true) {
           const { done, value } = await reader.read();
-          if (done) break;
+          if (done) {
+            console.log("Stream complete. Full text length:", fullText.length);
+            break;
+          }
+
+          const chunk = decoder.decode(value, { stream: true });
+          console.log("RX Chunk:", chunk);
 
           if (!hasTokens) {
+            // Check if chunk has visible content (ignore ZWSP \u200B and whitespace)
+            const isVisible = chunk.replace(/[\u200B\s]/g, '').length > 0;
+            if (!isVisible) continue;
+
             contentEl.textContent = "";
             hasTokens = true;
           }
 
-          const chunk = decoder.decode(value);
           fullText += chunk;
           contentEl.textContent = fullText;
           messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
-        if (!hasTokens) {
+        if (!hasTokens || !fullText.trim()) {
           contentEl.textContent = "The brain is cooling down. Please try again.";
         }
       } catch (streamError) {
