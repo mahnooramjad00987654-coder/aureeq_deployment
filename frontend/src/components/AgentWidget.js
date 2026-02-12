@@ -235,6 +235,10 @@ export function setupAgentInteraction(avatarRenderer) {
         setTimeout(() => showOrderPopup(name, price), 800);
       }
 
+      // Support Markdown links in static messages
+      displayText = displayText
+        .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" class="text-brand-gold underline hover:text-yellow-400 break-all">$1</a>');
+
       div.innerHTML = `
                 <div class="max-w-[85%]">
                   <div class="bg-brand-gold text-black text-[11px] font-bold px-4 py-1 rounded-t-xl w-full tracking-[0.2em] uppercase">Aureeq</div>
@@ -316,7 +320,16 @@ export function setupAgentInteraction(avatarRenderer) {
           }
 
           fullText += chunk;
-          contentEl.textContent = fullText;
+
+          // Simple Markdown Link Converter: [text](url) -> <a href="url" target="_blank">text</a>
+          const safeText = fullText
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/\n/g, "<br/>")
+            .replace(/\[(.*?)\]\((.*?)\)/g, '<a href="$2" target="_blank" class="text-brand-gold underline hover:text-yellow-400 break-all">$1</a>');
+
+          contentEl.innerHTML = safeText;
           messagesContainer.scrollTop = messagesContainer.scrollHeight;
         }
 
@@ -328,26 +341,24 @@ export function setupAgentInteraction(avatarRenderer) {
         contentEl.innerText += "\n[Connection interrupted. Please try again.]";
       }
 
-      // Trigger TTS?
-      if (avatarRenderer && fullText.trim()) { // Removed wasVoice check so it always speaks if desired, or re-add
-        // If user only wants speech when mic was used:
-        // if (wasVoice) { ... }
-        // User said "only speak... when the mic is being used" -> assuming this means "Speak response if User used Mic"
-        if (wasVoice) {
-          try {
-            const ttsRes = await fetch(`${API_BASE_URL}/tts`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: fullText })
-            });
-            const ttsData = await ttsRes.json();
-            if (ttsData.audio_url) {
-              const fullAudioUrl = ttsData.audio_url.startsWith('http') ? ttsData.audio_url : `${API_BASE_URL}${ttsData.audio_url}`;
-              avatarRenderer.speakFromUrl(fullAudioUrl);
-            }
-          } catch (e) {
-            console.error("TTS Error:", e);
+      // Trigger TTS? (Only if it was a voice input - User Request)
+      if (avatarRenderer && fullText.trim() && wasVoice) {
+        // Always play audio if avatar is present
+        try {
+          const ttsRes = await fetch(`${API_BASE_URL}/tts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: fullText })
+          });
+          const ttsData = await ttsRes.json();
+          if (ttsData.audio_url) {
+            const path = ttsData.audio_url;
+            // Fix: If path already starts with /api (from backend), don't prepend API_BASE_URL again
+            const fullAudioUrl = (path.startsWith('http') || path.startsWith('/')) ? path : `${API_BASE_URL}${path}`;
+            avatarRenderer.speakFromUrl(fullAudioUrl);
           }
+        } catch (e) {
+          console.error("TTS Error:", e);
         }
       }
 
@@ -482,7 +493,9 @@ export function setupAgentInteraction(avatarRenderer) {
 
       if (data.audio_url) {
         console.log("Playing welcome audio with lip-sync:", data.audio_url);
-        const fullWelcomeUrl = data.audio_url.startsWith('http') ? data.audio_url : `${API_BASE_URL}${data.audio_url}`;
+        const path = data.audio_url;
+        // Fix: If path already starts with /api or / (from backend), don't prepend API_BASE_URL again
+        const fullWelcomeUrl = (path.startsWith('http') || path.startsWith('/')) ? path : `${API_BASE_URL}${path}`;
 
         if (window.avatarFunctions && window.avatarFunctions.speakFromUrl) {
           window.avatarFunctions.speakFromUrl(fullWelcomeUrl);

@@ -11,3 +11,6 @@ chromadb
 httpx
 ollama
 netifaces
+sentence-transformers
+numpy
+scikit-learn

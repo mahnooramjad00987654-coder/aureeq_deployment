@@ -32,7 +32,14 @@ services:
     volumes:
       - ollama_storage:/root/.ollama
       - ./entrypoint.sh:/entrypoint.sh
-    entrypoint: ["/usr/bin/bash", "/entrypoint.sh"]
+    entrypoint: [ "/usr/bin/bash", "/entrypoint.sh" ]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [ gpu ]
 
   frontend:
     build:

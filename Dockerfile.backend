@@ -1,0 +1,31 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY model_training/scripts/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY model_training /app/model_training
+COPY data /app/data
+
+# Ensure database and logs directories exist
+RUN mkdir -p /app/model_training/scripts/data
+
+# Set working directory to where server.py is
+WORKDIR /app/model_training/scripts
+
+# Set environment variables
+ENV OLLAMA_HOST=http://aureeq-ollama:11434
+ENV PYTHONPATH=/app/model_training/scripts
+
+# Run with uvicorn for production stability
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8001"]

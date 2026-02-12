@@ -26,3 +26,9 @@ debug_ollama.py
 # IDE
 .vscode/
 .idea/
+
+# Security & Data
+certs/
+*.pem
+ollama_storage/
+model_training/scripts/data/

@@ -103,13 +103,7 @@ export const SalesAgent = {
     assembleContext: async (message, user) => {
         let contextParts = [];
 
-        // 1. RAG: Search Menu
-        const productContext = await fetchProductContext(message);
-        if (productContext) {
-            contextParts.push(`\nRELEVANT MENU ITEMS:\n${productContext}`);
-        }
-
-        // 2. Data: Order History (only if user identified)
+        // 1. Data: Order History (only if user identified)
         const userId = user.email || user.name;
         if (userId && userId !== 'Guest') {
             const orderHistory = await fetchOrderHistory(userId);

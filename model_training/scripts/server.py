@@ -1,26 +1,42 @@
 import os
 import json
 import sys
-from fastapi import FastAPI, HTTPException, Body, Request
-from fastapi.responses import StreamingResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from langchain_ollama import ChatOllama, OllamaEmbeddings
-from langchain_chroma import Chroma
-import edge_tts
+import re
 import asyncio
-import uuid
 import traceback
 import sqlite3
-from fastapi.middleware.cors import CORSMiddleware
-import re
+import uuid
+import difflib
+from typing import Optional, List, Dict, Any
 
-# Configuration
-DB_DIR = "../vector_store"
-EXAMPLES_DB_DIR = "../vector_store_examples"
+from fastapi import FastAPI, HTTPException, Body, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import httpx
+import numpy as np
+import edge_tts
+from simple_rag import SimpleExampleRAG
+import hardcode_rules as rules
+
+# ==================================================================================
+# CONFIGURATION
+# ==================================================================================
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OLLAMA_HOST_URL = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+MODEL_EMBED = "nomic-embed-text"
 SQLITE_PATH = "aureeq.db"
-MODEL_FAST = "phi3"
-MODEL_REASONING = "llama3.2:1b" 
+DATA_DIR = os.path.join(os.path.dirname(__file__), "../data")
+MENU_JSON_PATH = os.path.join(DATA_DIR, "menu.json")
+EXAMPLES_TXT_PATH = os.path.join(DATA_DIR, "sales_examples_new.txt")
+
+# Global State
+MENU_DATA: List[Dict] = []
+MENU_VECTORS: Optional[np.ndarray] = None
+HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+EXAMPLE_RAG: Optional[SimpleExampleRAG] = None
 
 app = FastAPI()
 
@@ -32,152 +48,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Prompts are now loaded from hardcode_rules.py
+SYSTEM_PROMPT_OPENAI = rules.SYSTEM_PROMPT_OPENAI
+
+# ==================================================================================
+# UTILITIES & DATABASE
+# ==================================================================================
+
 def log(msg):
     try:
         print(msg.encode('ascii', 'replace').decode('ascii'))
     except:
         print(msg)
     sys.stdout.flush()
-
-def get_ollama_url():
-    # Use environment variable for Ollama host (critical for Docker networking)
-    url = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-    log(f"Configured Ollama URL: {url}")
-    if '0.0.0.0' in url:
-        url = url.replace('0.0.0.0', '127.0.0.1')
-    if 'localhost' in url:
-        url = url.replace('localhost', '127.0.0.1')
-    if not url.startswith('http'):
-        url = f"http://{url}"
-    if ':11434' not in url:
-        url = f"{url}:11434"
-    return url
-
-def parse_menu_to_json(text):
-    """Parses markdown menu into a structured JSON tree."""
-    lines = text.split('\n')
-    menu = {}
-    current_section = None
-    current_subsection = None
-    
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-        
-        if line.startswith('## '):
-            section_name = line.replace('## ', '').strip()
-            current_section = section_name
-            menu[current_section] = {}
-            current_subsection = None
-            
-        elif line.startswith('### '):
-            if current_section:
-                subsection_name = line.replace('### ', '').strip()
-                current_subsection = subsection_name
-                menu[current_section][current_subsection] = []
-                
-        elif line.startswith('*'):
-            item_text = line.replace('*', '').strip()
-            if current_section and current_subsection:
-                 menu[current_section][current_subsection].append(item_text)
-            elif current_section:
-                if "Items" not in menu[current_section]:
-                    menu[current_section]["Items"] = []
-                menu[current_section]["Items"].append(item_text)
-                
-    return json.dumps(menu, indent=2, ensure_ascii=False)
-
-# 1. Setup Brain
-log("Loading Menu Data...")
-try:
-    MENU_PATH = os.path.join(os.path.dirname(__file__), "../data/carnivore_menu.txt")
-    with open(MENU_PATH, "r", encoding="utf-8") as f:
-        FULL_MENU_CONTEXT = f.read()[:4000] # Cap context for speed
-    log("Full Menu Loaded (Markdown, Capped)!")
-except Exception as e:
-    log(f"Error loading menu: {e}")
-    FULL_MENU_CONTEXT = "Menu data unavailable."
-
-# Load Ingredients Data
-log("Loading Ingredients Data...")
-try:
-    INGREDIENTS_PATH = os.path.join(os.path.dirname(__file__), "../data/ingredients.txt")
-    if os.path.exists(INGREDIENTS_PATH):
-        with open(INGREDIENTS_PATH, "r", encoding="utf-8") as f:
-            content = f.read()
-            content = re.sub(r'\n\s*\n', '\n\n', content)
-            FULL_MENU_CONTEXT += "\n\nINGREDIENTS DATA:\n" + content
-        log("Ingredients Loaded Successfully!")
-except Exception as e:
-    log(f"Error loading ingredients: {e}")
-
-# Load Sales Examples Vector Store
-log("Loading Sales Examples Vector Store...")
-try:
-    ollama_base_url = get_ollama_url()
-    embeddings = OllamaEmbeddings(model="nomic-embed-text", base_url=ollama_base_url)
-    if os.path.exists(EXAMPLES_DB_DIR):
-        example_store = Chroma(persist_directory=EXAMPLES_DB_DIR, embedding_function=embeddings)
-        log(f"Sales Examples Store Loaded")
-    else:
-        log("Sales Examples Store NOT FOUND.")
-        example_store = None
-except Exception as e:
-    log(f"Error loading Example Store: {e}")
-    example_store = None
-
-# Startup Connectivity Check
-async def verify_models(retries=5):
-    ollama_url = get_ollama_url()
-    import httpx
-    log(f"Checking Ollama at {ollama_url}")
-    for i in range(retries):
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(ollama_url)
-                if resp.status_code == 200:
-                    log("✅ Ollama Service: Online")
-                    list_resp = await client.get(f"{ollama_url}/api/tags")
-                    models = [m['name'] for m in list_resp.json().get('models', [])]
-                    for required in [MODEL_FAST, MODEL_REASONING, "nomic-embed-text:latest"]:
-                        found = False
-                        for m in models:
-                            if required.split(':')[0] in m:
-                                found = True
-                                break
-                        if not found:
-                             log(f"⚠️ Model MISSING: {required}")
-                             # Note: pulling is background task
-                        else:
-                            log(f"✅ Model READY: {required}")
-                    return True
-        except Exception as e:
-            log(f"❌ Connection Attempt {i+1} Failed: {str(e)[:50]}")
-            await asyncio.sleep(5)
-    return False
-
-@app.on_event("startup")
-async def startup_event():
-    init_db()
-    asyncio.create_task(verify_models())
-
-def get_llm(model_name):
-    ollama_base_url = get_ollama_url()
-    return ChatOllama(
-        model=model_name, 
-        base_url=ollama_base_url,
-        keep_alive="24h",
-        timeout=600,
-        num_ctx=4096,
-        temperature=0.3,
-        num_thread=8
-    )
-
-class ChatRequest(BaseModel):
-    message: str
-    user_id: str = None
-    user_metadata: dict = None
-    context: str = None
 
 def get_db_connection():
     conn = sqlite3.connect(SQLITE_PATH)
@@ -207,19 +91,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-def sync_user(email: str, name: str = None, preferences: str = None):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT email FROM users WHERE email = ?", (email,))
-        if cursor.fetchone():
-            cursor.execute("UPDATE users SET name = COALESCE(?, name), preferences = COALESCE(?, preferences) WHERE email = ?", (name, preferences, email))
-        else:
-            cursor.execute("INSERT INTO users (email, name, preferences) VALUES (?, ?, ?)", (email, name or "Guest", preferences))
-        conn.commit()
-    except Exception as e: log(f"DB Error: {e}")
-    finally: conn.close()
-
 def save_order(user_id: str, items: list, total_price: float):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -235,233 +106,519 @@ def save_order(user_id: str, items: list, total_price: float):
         return None
     finally: conn.close()
 
-# --- Chat Logic ---
+# ==================================================================================
+# DATA LOADING & VECTOR SEARCH (RAG)
+# ==================================================================================
 
-# --- Router Logic ---
-
-PROMPT_FAST = """You are Aureeq, the personal food assistant for IYI restaurant.
-INTERNAL CONFIGURATION: Handle SIMPLE, DIRECT queries.
-STRICT RULES:
-1. MENU ONLY: If item is not in menu, say: "Sorry, we don't offer that item at the moment, but you can explore our other options."
-2. EXACTNESS: Use exact names and prices from menu. No inventing.
-3. BREVITY: Max 2-4 sentences. Friendly, human tone. Always mention "IYI" when referring to the restaurant or menu.
-4. ORDER TAGGING: ONLY append [ORDER: Item Name | Price] if user EXPLICITLY says "add", "buy", or "order".
-   - IF user asks "What is X?" -> NO TAG.
-   - IF user says "I like X" -> NO TAG.
-   - IF you suggest X -> NO TAG.
-   - ONLY when user says "Add X to cart" -> TAG.
-5. NON-FOOD: If query is non-food, say: "I apologize, but I am a food assistant and cannot help with that. However, I can help you find delicious items on the IYI menu! Would you like a suggestion?"
-6. NO CHATTER: Do NOT state your internal role or limitations (e.g., "I handle simple queries") in normal conversation. Just answer the user.
-7. CONTEXT: Name: {user_name}. Preferences: {user_preferences}.
-
-MENU DATA:
-{context}
-"""
-
-PROMPT_REASONING = """You are Aureeq, the personal food assistant for IYI restaurant.
-INTERNAL CONFIGURATION: Provide recommendations.
-STRICT RULES:
-1. MENU ONLY: Use menu data. Do not invent items.
-2. RECOMMEND: Suggest ONE item based on user request.
-3. STYLE: Use the provided EXAMPLE as style guidance only. Do NOT copy it.
-4. BREVITY: Max 2-4 sentences. No long explanations.
-5. NO ORDER TAGS: Do NOT generate [ORDER: ...] tags. Ask for confirmation first.
-6. NON-FOOD: If query is non-food, say: "I apologize, but I am a food assistant and cannot help with that. However, I can help you find delicious items on the IYI menu! Would you like a suggestion?"
-7. NO CHATTER: Do NOT state your internal role or limitations in normal conversation.
-8. CONTEXT: Name: {user_name}. Preferences: {user_preferences}.
-
-MENU DATA:
-{context}
-
-EXAMPLE STYLE (Do not copy contents, only tone):
-{examples}
-"""
-
-def route_query(text):
-    text = text.lower()
-    
-    # 1. Guardrails (Non-food) - Return "reject"
-    non_food = ["weather", "news", "coding", "programming", "politics", "joke", "sports", "movie", "technology", "stock", "finance"]
-    if any(w in text for w in non_food):
-        return "reject"
-
-    # 2. Reasoning / Recommendations -> Llama
-    reasoning_keywords = [
-        "recommend", "suggest", "best", "what should i", "choose",
-        "sweet", "spicy", "light", "heavy", "drink", "dessert", "main", "something"
-    ]
-    if any(w in text for w in reasoning_keywords):
-        return "reasoning"
-
-    # 3. Default -> Fast (Greetings, Menu, Order, Hunger)
-    return "fast"
-
-async def get_relevant_examples_async(query: str, k: int = 3):
-    if not example_store: return ""
+async def get_ollama_embedding(text: str):
     try:
-        results = await asyncio.to_thread(example_store.similarity_search, query, k=k)
-        return "\n\n".join([doc.metadata.get("full_example", doc.page_content) for doc in results]).strip()
+        resp = await HTTP_CLIENT.post(
+            f"{OLLAMA_HOST_URL}/api/embeddings",
+            json={"model": MODEL_EMBED, "prompt": text},
+            timeout=5.0
+        )
+        if resp.status_code == 200:
+            return resp.json().get("embedding")
     except Exception as e:
-        log(f"ERROR RAG: {e}")
-        return ""
+        log(f"Embedding ID Error: {e}")
+    return None
 
-# --- API Endpoints ---
+async def init_data():
+    global MENU_DATA, MENU_VECTORS
+    if not os.path.exists(MENU_JSON_PATH):
+        log("ERROR: menu.json not found!")
+        return
 
-@app.post("/api/products/search")
-async def search_products(payload: dict = Body(...)):
-    query = payload.get("query", "").lower()
-    log(f"DEBUG: Product search: {query}")
-    results = []
-    lines = FULL_MENU_CONTEXT.replace('{', '').replace('}', '').replace('"', '').split('\n')
-    for line in lines:
-        if query in line.lower() and ('£' in line or '€' in line or ':' in line):
-             results.append({"content": line.strip(), "metadata": {}})
-    return {"results": results[:5]}
+    try:
+        with open(MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            MENU_DATA = json.load(f)
+        log(f"Loaded {len(MENU_DATA)} menu items.")
+        
+        # Pre-compute vectors if possible, or computing on demand (batching preferred)
+        # For simplicity/speed in this restart, we'll embed on demand or do a quick batch if small
+        # Actually, let's do sequential async init for reliability
+        vectors = []
+        log("Initializing Embeddings...")
+        for item in MENU_DATA:
+            text = f"{item['name']} {item['description']} {item['category']}"
+            vec = await get_ollama_embedding(text)
+            if vec:
+                vectors.append(vec)
+            else:
+                vectors.append([0.0]*768) # Fallback
+        
+        from sklearn.metrics.pairwise import cosine_similarity
+        MENU_VECTORS = np.array(vectors)
+        log("Embeddings Initialized.")
+        
+    except Exception as e:
+        log(f"Data Init Error: {e}")
 
-@app.post("/api/memory/search")
-async def search_memory(payload: dict = Body(...)):
-    return {"results": []}
+    # Initialize Example RAG
+    global EXAMPLE_RAG
+    EXAMPLE_RAG = SimpleExampleRAG(EXAMPLES_TXT_PATH, get_ollama_embedding)
+    await EXAMPLE_RAG.load_examples()
 
-@app.get("/api/dataHandler")
-async def data_handler(type: str, user_id: str = None):
-    log(f"DEBUG: Data handler: {type} for {user_id}")
-    if type == "orders" and user_id:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT items, created_at, total_price FROM orders WHERE user_id = ? ORDER BY created_at DESC LIMIT 5", (user_id,))
-            orders = cursor.fetchall()
-            order_list = [dict(o) for o in orders]
-            return {
-                "results": [{"content": f"Past order: {o['items']}", "metadata": {}} for o in order_list],
-                "orders": order_list
-            }
-        finally: conn.close()
-    return {"results": [], "orders": []}
+async def get_nearest_item(query: str):
+    if MENU_VECTORS is None or not MENU_DATA:
+        return None
+    
+    query_vec = await get_ollama_embedding(query)
+    if not query_vec:
+        return None
+        
+    from sklearn.metrics.pairwise import cosine_similarity
+    scores = cosine_similarity([query_vec], MENU_VECTORS)[0]
+    best_idx = np.argmax(scores)
+    
+    # Threshold check? strictness requires relevance.
+    # returning top 1 unconditionally as per strict interaction rules for Path B
+    return MENU_DATA[best_idx]
 
+# ==================================================================================
+# INTENT ROUTER & PATH LOGIC
+# ==================================================================================
+
+def classify_intent(msg: str) -> str:
+    msg = msg.lower()
+    
+    # 0. STRICT ADD TO CART CHECK (Priority)
+    if any(k in msg for k in rules.ADD_TO_CART_KEYWORDS) or any(all(w in msg for w in p) for p in rules.ADD_TO_CART_PAIRS):
+        item = find_item_lenient(msg)
+        if item:
+            return "add_to_cart"
+
+    # 1. GREETING
+    if re.search(rules.GREETING_RE, msg) or any(p in msg for p in rules.GREETING_PHRASES):
+        return "greeting"
+
+    # 1.5 RESTAURANT QUERY (Identity)
+    if any(x in msg for x in rules.IDENTITY_KEYWORDS):
+        return "restaurant_query"
+        
+    # 1.8 RESERVATION QUERY
+    if any(x in msg for x in rules.RESERVATION_KEYWORDS):
+        return "reservation_query"
+        
+    # --- HIGH PRIORITY MATCHES ---
+    
+    # 0.4 ADVERSARIAL / ROLEPLAY / SYSTEM CHECK (Strict)
+    if any(x in msg for x in ["ignore", "forget", "pretend", "act like", "as a ", "system prompt", "internal rules"]):
+        return "non_food"
+
+    # 0.5 OUT-OF-MENU CHECK (High Priority)
+    if any(x in msg for x in rules.BLOCKED_FOOD):
+        # Allow if it's a specific question about an EXISTING item (e.g., "Tell me about Chicken Wings" even if 'chicken' is blocked - wait, don't block 'chicken')
+        # We only block specific missing dishes.
+        has_real_item = any(i['name'].lower() in msg for i in MENU_DATA)
+        if not has_real_item:
+            return "out_of_menu"
+    
+    # Check for Specific Dish match first (High Priority)
+    # If the user names a specific dish (e.g. "Lamb Chops"), we treat as food_interest for Path B.
+    potential_item = find_item_lenient(msg)
+    if potential_item:
+        # Check if it's a specific question about the item
+        if any(x in msg for x in rules.DISH_QUERY_KEYWORDS):
+            return "dish_query"
+        return "food_interest"
+
+    # SECTION/CATEGORY QUERY (e.g. "Show me seafood")
+    # Check strict mapping first
+    for cat_key in rules.CATEGORY_MAP.keys():
+        if re.search(r'\b' + re.escape(cat_key) + r's?\b', msg):
+            return "section_query"
+            
+    if any(x in msg for x in rules.SECTION_QUERY_KEYWORDS):
+        return "section_query"
+
+    # MENU QUERY (List)
+    if any(x in msg for x in rules.MENU_QUERY_KEYWORDS) or any(x in msg for x in rules.MENU_TYPO_KEYWORDS):
+        return "menu_query"
+
+    # RECOMMENDATION / HUNGER / CRAVING / TASTE
+    if any(x in msg for x in rules.HUNGER_TRIGGERS):
+        return "food_interest"
+    
+    # 2.5 NON-FOOD (Strict)
+    if any(x in msg for x in rules.STOP_TOPICS):
+        return "non_food"
+
+    # Default fallback
+    return "food_interest"
+
+def find_item_fuzzy(name_query: str):
+    # simple substring match
+    name_query = name_query.lower()
+    for item in MENU_DATA:
+        if item['name'].lower() in name_query:
+            return item
+    return None
+
+def find_item_lenient(query: str):
+    # 1. Exact/Substring match first (e.g. "I want Baklava")
+    exact = find_item_fuzzy(query)
+    if exact: return exact
+    
+    query_lower = query.lower()
+    keywords = query_lower.split()
+    all_names = [i['name'].lower() for i in MENU_DATA]
+    
+    # 2. DISABLED: Single word match is too loose (e.g. "Gosht" matches "Ranjha Gosht" even for "Achar Gosht")
+    # Instead, we rely on fuzzy matching of the WHOLE PHRASE first.
+    pass
+
+    # Remove Common Question/Order Words for better fuzzy match
+    STOP_WORDS = ["what", "is", "describe", "tell", "me", "about", "i", "want", "to", "order", "get", "buy", "a", "an", "the", "price", "how", "much", "ingredients"]
+    query_clean = query_lower
+    for w in STOP_WORDS:
+        query_clean = query_clean.replace(w, "").strip() # naive replace but works for whole words usually if padded
+        # Better: split and filter
+    
+    query_words = [w for w in query_lower.split() if w not in STOP_WORDS and len(w) > 2]
+    query_clean_str = " ".join(query_words)
+
+    # 3. Difflib fuzzy match on full CLEANED query
+    # E.g. Query="what is prawn tikka" -> Clean="prawn tikka" -> Fuzzy Match="Prawns Tikka" (Success)
+    if query_clean_str:
+        matches = difflib.get_close_matches(query_clean_str, all_names, n=1, cutoff=0.75) # slightly strict but allows plural diffs
+        if matches:
+            return next((i for i in MENU_DATA if i['name'].lower() == matches[0]), None)
+
+    # 4. Fallback on original query if cleaned failed
+    matches = difflib.get_close_matches(query_lower, all_names, n=1, cutoff=0.8)
+
+    # 4. Difflib on keywords (Typos in partial names)
+    # 4. Difflib on keywords (Typos in partial names) - Also increased cutoff
+    for word in keywords:
+        if len(word) > 4: # increased min length to 4
+            matches = difflib.get_close_matches(word, all_names, n=1, cutoff=0.8) # increased from 0.7
+            if matches:
+                return next((i for i in MENU_DATA if i['name'].lower() == matches[0]), None)
+                
+    return None
+
+# ==================================================================================
+# API ENDPOINTS
+# ==================================================================================
+
+class ChatRequest(BaseModel):
+    message: str
+    user_id: str = None
+    user_metadata: dict = None
+
+class TTSRequest(BaseModel):
+    text: str
+    voice: str = "en-US-ChristopherNeural"
+
+@app.on_event("startup")
+async def startup_event():
+    global HTTP_CLIENT
+    HTTP_CLIENT = httpx.AsyncClient(timeout=60.0)
+    init_db()
+    asyncio.create_task(init_data())
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if HTTP_CLIENT:
+        await HTTP_CLIENT.aclose()
+
+@app.post("/chat")
 @app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
     user_query = request.message
-    log(f"--- Chat Request: {user_query} ---")
-
-    async def chat_generator():
-        # Yield Zero-Width Space to keep connection open without visible text
-        yield "\u200B"
-        
+    log(f"--- Chat: {user_query} ---")
+    
+    async def response_stream():
         try:
-            # 1. User Context
-            name = "Guest"
-            preferences = ""
-            if request.user_metadata:
-                name = request.user_metadata.get("name", "Guest")
-                preferences = request.user_metadata.get("preferences", "")
-                if request.user_metadata.get("email"): 
-                    sync_user(request.user_metadata["email"], name, preferences)
+            intent = classify_intent(user_query)
+            log(f"Intent: {intent}")
 
-            # 2. Routing
-            route = route_query(user_query)
-            log(f"DEBUG: Router decided: {route.upper()}")
-
-            if route == "reject":
-                yield "I am only trained to help you with food and menu selections."
+            # --- PATH A: DETERMINSTIC (No LLM) ---
+            
+            if intent == "greeting":
+                yield rules.RESP_GREETING
+                return
+                
+            if intent == "restaurant_query":
+                yield rules.RESP_IDENTITY
+                return
+                
+            if intent == "reservation_query":
+                yield rules.RESP_RESERVATION
                 return
 
-            model_to_use = MODEL_FAST
-            prompt = ""
-            
-            if route == "fast":
-                model_to_use = MODEL_FAST
-                system = PROMPT_FAST.replace("{context}", FULL_MENU_CONTEXT)\
-                                    .replace("{user_name}", name)\
-                                    .replace("{user_preferences}", preferences)
-                prompt = f"{system}\n\nUser: {user_query}\nAureeq: "
-            
-            else: # reasoning
-                model_to_use = MODEL_REASONING
-                # Fetch MAX 1 example
-                example_text = await get_relevant_examples_async(user_query, k=1)
-                system = PROMPT_REASONING.replace("{context}", FULL_MENU_CONTEXT)\
-                                         .replace("{user_name}", name)\
-                                         .replace("{user_preferences}", preferences)\
-                                         .replace("{examples}", example_text or "No examples.")
-                prompt = f"{system}\n\nUser: {user_query}\nAureeq: "
+            if intent == "non_food":
+                yield rules.RESP_NON_FOOD
+                return
+                
+            if intent == "add_to_cart":
+                found_item = find_item_lenient(user_query)
+                if found_item:
+                    yield rules.RESP_ADD_TO_CART_SUCCESS.format(name=found_item['name'], price=found_item['price'])
+                else:
+                    yield rules.RESP_ADD_TO_CART_FAIL
+                return
 
-            # 3. Generation
-            log(f"DEBUG: Invoking {model_to_use}...")
-            # ollama_url = get_ollama_url()
-            ollama_url = "http://127.0.0.1:11434"
-            import httpx
-            
-            async with httpx.AsyncClient(timeout=600.0, trust_env=False) as client:
-                async with client.stream("POST", f"{ollama_url}/api/generate", json={
-                    "model": model_to_use,
-                    "prompt": prompt,
-                    "prompt": prompt,
-                    "stream": True,
-                    "keep_alive": "24h",
-                    "options": {"temperature": 0.3}
-                }) as response:
-                    if response.status_code != 200:
-                        yield f"[Error: {response.status_code}]"
-                        return
+            if intent == "menu_query":
+                # User asked for WHOLE MENU. Show all details? User said "show them the whole menu".
+                # To be safe but compliant, we list ALL headings and items.
+                output = [rules.RESP_MENU_HEADER]
+                categories = sorted(list(set(i['category'] for i in MENU_DATA)))
+                for cat in categories:
+                    items = [i for i in MENU_DATA if i['category'] == cat]
+                    output.append(f"\n--- {cat.upper()} ({len(items)} dishes) ---")
+                    # List Name + Price only for full menu to keep it readable, unless user asked for details?
+                    # User request: "if asked for the menu show them the whole menu"
+                    # We will show Name + Price for brevity but cover everything.
+                    for item in items:
+                        output.append(f"- {item['name']} (£{item['price']})")
+                
+                yield "\n".join(output)
+                return
 
-                    async for line in response.aiter_lines():
-                        if not line: continue
-                        try:
-                            chunk = json.loads(line)
-                            if "error" in chunk: break
-                            content = chunk.get("response")
-                            if content: yield content
-                            if chunk.get("done"): break
-                        except Exception as e:
-                            log(f"Chunk parsing error: {e} in line: {line}")
+            if intent == "section_query":
+                # Identify which categories to show
+                target_cats = []
+                msg_lower = user_query.lower()
+                
+                # Check mapping
+                for key, cats in rules.CATEGORY_MAP.items():
+                    if re.search(r'\b' + re.escape(key) + r's?\b', msg_lower):
+                        target_cats.extend(cats)
+                
+                # Uniquify
+                target_cats = list(set(target_cats))
+                
+                if not target_cats:
+                   # Fallback: Treat as full menu or error?
+                   yield "I'm not sure which section you mean. We have Starters, BBQ, Specials, Desserts, and Drinks."
+                   return
+
+                output = []
+                for cat in target_cats:
+                    items = [i for i in MENU_DATA if i['category'] == cat]
+                    if items:
+                        output.append(f"\n--- {cat.upper()} ({len(items)} dishes) ---")
+                        # User Rule: "show them the all dishes with exact price and description listed their"
+                        for item in items:
+                            output.append(f"\n* {item['name']} ({item['price']})\n  {item['description']}")
+                
+                if not output:
+                     yield "I couldn't find any items in that section."
+                else:
+                     yield "\n".join(output)
+                return
+
+            if intent == "out_of_menu":
+                # Get a high-quality recommendation
+                rec = next((i for i in MENU_DATA if "Lamb Chops" in i['name']), MENU_DATA[0])
+                yield rules.RESP_OUT_OF_MENU_APOLOGY.format(name=rec['name'], price=rec['price'])
+                return
+
+            if intent == "dish_query":
+                item = find_item_lenient(user_query)
+                if item:
+                    yield rules.RESP_DISH_DETAILS.format(name=item['name'], price=item['price'], description=item['description'])
+                else:
+                    yield rules.RESP_DISH_NOT_FOUND
+                return
+
+            # --- DETERMINISTIC OUT-OF-MENU (Consolidated) ---
+            # If the user is specifically ordering/asking for a dish we DON'T have
+            is_specific_request = any(x in user_query.lower() for x in rules.FOOD_REQUEST_INDICATORS)
+            is_bypass = any(x in user_query.lower() for x in rules.BYPASS_APOLOGY_KEYWORDS)
+            item_exists = find_item_lenient(user_query)
+            
+            if is_specific_request and not item_exists and not is_bypass:
+                # Get a high-quality recommendation (RAG would be overkill here, use popular items)
+                rec = next((i for i in MENU_DATA if "Lamb Chops" in i['name']), MENU_DATA[0])
+                yield rules.RESP_OUT_OF_MENU_APOLOGY.format(name=rec['name'], price=rec['price'])
+                return
+
+            # --- PATH B: REASONING (OpenAI + RAG) ---
+            
+            if intent == "food_interest" or intent == "recommendation":
+                # 0. STRICT DESSERT/ITEM QUERY Check
+                # If the user mentions a specific item we HAVE, serve definition deterministically.
+                # This prevents "Prawn Tikka Masala" hallucinations.
+                specific_item_match = find_item_lenient(user_query)
+                if specific_item_match:
+                    yield rules.RESP_DISH_DETAILS.format(name=specific_item_match['name'], price=specific_item_match['price'], description=specific_item_match['description'])
+                    yield "\n\nWould you like to add it to your order?"
+                    return
+
+                # 1. Try Lenient Search First (Specific Item Focus) -- redundant now but keep for nearest logic
+                nearest_item = None # Reset
+                
+                # 2. If no specific item found, use RAG Retrieval
+                nearest_item = await get_nearest_item(user_query)
+                
+                # 3. Retrieve Style Example
+                style_example = ""
+                if EXAMPLE_RAG and EXAMPLE_RAG.is_ready:
+                    style_example = await EXAMPLE_RAG.retrieve(user_query)
+
+                if not nearest_item:
+                     # If truly NOTHING found even via RAG (rare), fallback to list
+                    yield rules.RESP_FALLBACK_RECOMMENDATION
+                    return
+                    
+                # 4. OpenAI Generation
+                context_str = json.dumps(nearest_item, indent=2)
+                
+                # 3. Global IYI Context (Dish names) to ensure recommendation
+                global_context = "AVAILABLE IYI MENU ITEMS: " + ", ".join([i['name'] for i in MENU_DATA])
+                
+                # 4. Final System Message Construction
+                additional_warning = ""
+                nearest_item_context = nearest_item.copy() if nearest_item else {}
+                
+                # Check: Is the user asking for X but we are giving context for Y?
+                # Deterministic Out-of-Menu Checks
+                is_specific_request = any(x in user_query.lower() for x in rules.FOOD_REQUEST_INDICATORS)
+                is_bypass = any(x in user_query.lower() for x in rules.BYPASS_APOLOGY_KEYWORDS)
+                
+                # Check: Is the user asking for X but we are giving context for Y?
+                # NOTE: We use find_item_lenient(user_query) to check if the specific item exists.
+                # If not, but we have a `nearest_item` (from RAG), we MUST warn the AI.
+                item_exists_deterministic = find_item_lenient(user_query)
+                
+                if is_specific_request and not item_exists_deterministic:
+                    additional_warning = "" 
+                    # STRICT MASKING: Do not even mention the missing item to the LLM. 
+                    # The apology handled the "not found" part.
+                    # We only want the description of the RECOMMENDATION.
+                    system_msg = SYSTEM_PROMPT_OPENAI.format(
+                        context_item=json.dumps(nearest_item_context, indent=2),
+                        style_example=style_example,
+                        global_context=global_context
+                    )
+                    # Rewrite the User Message for the LLM context to focus ONLY on the available item
+                    user_query_for_llm = f"Describe '{nearest_item['name']}' ({nearest_item['price']}) enthusiastically. Do not mention availability."
+                else:
+                    system_msg = SYSTEM_PROMPT_OPENAI.format(
+                        context_item=json.dumps(nearest_item_context, indent=2),
+                        style_example=style_example,
+                        global_context=global_context
+                    )
+                    user_query_for_llm = user_query
+                
+                if is_specific_request and not item_exists_deterministic and not is_bypass:
+                    # The consolidated apology was already yielded before Path B.
+                    # We only proceed to Path B to provide the enthusiastic description of the recommendation.
+                    pass
+
+                messages = [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": user_query_for_llm}
+                ]
+                
+                try:
+                    async with HTTP_CLIENT.stream(
+                        "POST", 
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+                        json={
+                            "model": "gpt-4o-mini", 
+                            "messages": messages,
+                            "stream": True,
+                            "temperature": 0.7,
+                            "max_tokens": 600 # Increased further to ensure completion (User Request)
+                        }, timeout=20.0
+                    ) as response:
+                        # ... processing loop ...
+                        if response.status_code != 200:
+                            # ... exception ...
+                            raw_err = await response.aread()
+                            err = raw_err.decode('utf-8', errors='replace')
+                            raise Exception(f"OpenAI API Error: {response.status_code} - {err}")
+
+                        async for line in response.aiter_lines():
+                            if not line.strip(): continue
+                            if line.startswith("data: [DONE]"): break
+                            if line.startswith("data: "):
+                                try:
+                                    chunk = json.loads(line[6:])
+                                    content = chunk["choices"][0]["delta"].get("content", "")
+                                    if content: yield content
+                                except: pass
+
+                except Exception as e:
+                    log(f"OpenAI Stream Error: {e}")
+                    # Fallback to Local Llama-3.2:1b
+                    log("Falling back to local Llama-3.2:1b...")
+                    # ... fallback logic similar update ...
+                    try:
+                        # Inject simplified instructions for local model
+                        async with HTTP_CLIENT.stream("POST", f"{OLLAMA_HOST_URL}/api/chat", json={
+                            "model": "llama3.2:1b",
+                            "messages": [{"role": "system", "content": system_msg}, {"role": "user", "content": user_query_for_llm}],
+                            "stream": True,
+                            "options": {"temperature": 0.3, "num_predict": 600} # Increased to ensure completion
+                        }, timeout=30.0) as resp:
+                             async for line in resp.aiter_lines():
+                                if not line: continue
+                                chunk = json.loads(line)
+                                content = chunk.get("message", {}).get("content", "")
+                                if content: yield content
+                    except Exception as local_e:
+                        log(f"Local Fallback Error: {local_e}")
+                        yield rules.RESP_TIMEOUT_FALLBACK
+                return
         except Exception as e:
-            log(f"CRITICAL ERROR: {e}")
-            yield f"[Error: {str(e)[:40]}]"
+            log(f"CRITICAL STREAM ERROR: {e}")
+            log(traceback.format_exc())
+            yield rules.RESP_CRITICAL_ERROR
 
-    return StreamingResponse(
-        chat_generator(), 
-        media_type="text/plain",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-            "Content-Type": "text/plain; charset=utf-8"
-        }
-    )
+    return StreamingResponse(response_stream(), media_type="text/plain")
 
-@app.get("/api/welcome")
-async def welcome_endpoint(user_id: str = None, name: str = None):
-    welcome_text = "Hello! I am Aureeq, your personal food assistant at IYI. How may I help you today?"
-    audio_filename = f"welcome_{uuid.uuid4()}.mp3"
-    audio_path = os.path.join(DATA_DIR, audio_filename)
-    try:
-        communicate = edge_tts.Communicate(welcome_text, "en-US-GuyNeural")
-        await communicate.save(audio_path)
-        return {"response": welcome_text, "audio_url": f"/audio/{audio_filename}"}
-    except Exception:
-        return {"response": welcome_text, "audio_url": None}
+# ==================================================================================
+# TTS / AUDIO ENDPOINTS
+# ==================================================================================
 
+@app.post("/tts")
 @app.post("/api/tts")
-async def tts_endpoint(text: str = Body(..., embed=True)):
-    audio_filename = f"tts_{uuid.uuid4()}.mp3"
-    audio_path = os.path.join(DATA_DIR, audio_filename)
+async def tts_endpoint(request: TTSRequest):
     try:
-        communicate = edge_tts.Communicate(text, "en-US-GuyNeural")
-        await communicate.save(audio_path)
-        return {"audio_url": f"/audio/{audio_filename}"}
-    except Exception:
-        return {"audio_url": None}
+        text = request.text
+        voice = request.voice
+        if not text:
+            raise HTTPException(status_code=400, detail="Text is required")
 
-@app.post("/api/order")
-async def create_order(request: dict):
-    order_id = save_order(request.get("user_id"), request.get("items", []), request.get("total", 0.0))
-    if order_id: return {"status": "success", "order_id": order_id}
-    raise HTTPException(status_code=500, detail="Failed to save order")
+        # Generate unique filename based on text hash or uuid
+        # For simplicity, use uuid
+        filename = f"tts_{uuid.uuid4()}.mp3"
+        filepath = os.path.join(DATA_DIR, filename)
+        
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(filepath)
+        
+        return {"audio_url": f"/api/audio/{filename}"}
+    except Exception as e:
+        log(f"TTS Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "../data")
-os.makedirs(DATA_DIR, exist_ok=True)
-app.mount("/api/audio", StaticFiles(directory=DATA_DIR), name="audio")
+@app.get("/welcome")
+@app.get("/api/welcome")
+async def welcome_endpoint(name: str = "Guest", user_id: str = None):
+    text = f"Hello {name}, I am AUREEQ your personal assistant. How may I help you today?"
+    try:
+        # Check for cached welcome message? 
+        # For dynamic names, we generate fresh.
+        filename = f"welcome_{uuid.uuid4()}.mp3"
+        filepath = os.path.join(DATA_DIR, filename)
+        
+        communicate = edge_tts.Communicate(text, "en-US-ChristopherNeural")
+        await communicate.save(filepath)
+        
+        return {"response": text, "audio_url": f"/api/audio/{filename}"}
+    except Exception as e:
+        log(f"Welcome TTS Error: {e}")
+        return {"response": text, "audio_url": None}
+
+app.mount("/api/audio", StaticFiles(directory=DATA_DIR), name="audio_api")
+app.mount("/audio", StaticFiles(directory=DATA_DIR), name="audio_root")
 
 if __name__ == "__main__":
     import uvicorn

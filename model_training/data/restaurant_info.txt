@@ -1,0 +1,10 @@
+RESTAURANT INFORMATION (IYI Restaurant):
+
+ADDRESS: 123 High Street, London, UK
+PHONE: +44 20 1234 5678
+EMAIL: info@iyirestaurant.co.uk
+OPENING HOURS: 12:00 PM - 11:00 PM (Daily)
+
+RESERVATIONS:
+To make a reservation, please call us at +44 20 1234 5678 or email info@iyirestaurant.co.uk.
+We recommend booking in advance for weekends.
