@@ -1,56 +1,58 @@
 services:
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
+  proxy:
+    image: nginx:stable-alpine
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./nginx.conf:/etc/nginx/ssl.conf:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/ssl:ro
     depends_on:
       - frontend
       - backend
+    networks:
+      - aureeq-net
+    restart: always
 
   backend:
     build:
       context: .
-      dockerfile: model_training/scripts/Dockerfile
+      dockerfile: Dockerfile.backend
     environment:
-      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_HOST=http://ai-engine:11434
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
-      - ollama
+      - ai-engine
     volumes:
       - ./data:/app/data
-      - ./model_training/vector_store:/app/model_training/vector_store
-      - ./model_training/vector_store_examples:/app/model_training/vector_store_examples
+      - ./model_training/scripts/aureeq.db:/app/model_training/scripts/aureeq.db
+    networks:
+      - aureeq-net
+    restart: always
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ollama
+  ai-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.ollama
+    # No GPU reservation here for broad VPS compatibility
     volumes:
       - ollama_storage:/root/.ollama
-      - ./entrypoint.sh:/entrypoint.sh
-    entrypoint: [ "/usr/bin/bash", "/entrypoint.sh" ]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
+    networks:
+      - aureeq-net
+    restart: always
 
   frontend:
     build:
       context: .
-      dockerfile: frontend/Dockerfile
-    ports:
-      - "5173:5173"
-    depends_on:
-      - backend
+      dockerfile: Dockerfile.frontend
+    networks:
+      - aureeq-net
+    restart: always
+
+networks:
+  aureeq-net:
+    driver: bridge
 
 volumes:
   ollama_storage:
-  caddy_data:
-  caddy_config:

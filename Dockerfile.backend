@@ -24,7 +24,7 @@ RUN mkdir -p /app/model_training/scripts/data
 WORKDIR /app/model_training/scripts
 
 # Set environment variables
-ENV OLLAMA_HOST=http://aureeq-ollama:11434
+ENV OLLAMA_HOST=http://ai-engine:11434
 ENV PYTHONPATH=/app/model_training/scripts
 
 # Run with uvicorn for production stability

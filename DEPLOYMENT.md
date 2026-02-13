@@ -10,14 +10,12 @@ If your VPS already has other containers running (e.g., Nginx Proxy Manager, Tra
 
 1.  **Transfer Files**: Copy all files to your VPS folder.
 2.  **Add Certificates**: Place `fullchain.pem` and `privkey.pem` in the `./certs` folder.
-3.  **Build Images**:
+3.  **Set Environment Variables**: Create a `.env` file and add your `OPENAI_API_KEY`.
+4.  **Launch Services**:
     ```bash
-    docker-compose -f docker-compose.vps.yml build
-    ```
-4.  **Start Services**:
-    ```bash
-    docker-compose -f docker-compose.vps.yml up -d
+    docker-compose up -d --build
     ```
 
 ## 🛠 Troubleshooting
-*   **GPU Error**: If you see `could not select device driver nvidia`, it means your VPS does not have a GPU. I have already commented out the GPU requirement in `docker-compose.vps.yml` to allow it to run on regular CPUs.
+*   **GPU Error**: GPU reservations have been removed. AUREEQ will run on your CPU.
+*   **Port Conflicts**: If port 80/443 is used, disable the `proxy` service in `docker-compose.yml` and use your own Nginx/Caddy.
