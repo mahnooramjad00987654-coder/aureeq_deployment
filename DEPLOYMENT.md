@@ -1,19 +1,23 @@
-# VPS Deployment Plan for AUREEQ
+## 🐳 Shared Environments (Advanced)
+If your VPS already has other containers running (e.g., Nginx Proxy Manager, Traefik, or other websites):
 
-To make AUREEQ "Docker-ready" and self-contained for your VPS, we will:
+1.  **Avoid Port Conflicts**: In `docker-compose.vps.yml`, if port `80` or `443` is already taken, you can either:
+    *   Stop the existing service temporarily.
+    *   OR (Recommended) Disable the `aureeq-proxy` service in the compose file and point your existing external proxy to `aureeq-frontend:80` and `aureeq-backend:8001`.
+2.  **Isolated Network**: AUREEQ uses a private network (`aureeq-net`), so it will not interfere with your other containers' internal traffic.
 
-1.  **Pre-package AI Models**: Create a custom Ollama image that includes `llama3.2:1b` and `nomic-embed-text`. This ensures the container works offline and doesn't need to pull large models on startup.
-2.  **HTTPS with Nginx**: Configure Nginx as a reverse proxy that uses your own SSL certificates (placed in a `certs/` volume).
-3.  **Isolated Internal Network**: Use a dedicated Docker bridge network so it doesn't conflict with your other containers.
-4.  **Persistence**: Use Docker volumes for the SQLite database and internal state.
+## 🚀 Step-by-Step Launch (Standard)
 
-## File Structure for Deployment
-- `docker-compose.yml` - Orchestration.
-- `Dockerfile.backend` - Optimized Python backend.
-- `Dockerfile.frontend` - Production build of the React app.
-- `Dockerfile.ollama` - Custom image with baked-in models.
-- `nginx.conf` - Reverse proxy with SSL config.
-- `certs/` - Folder where you will place your `fullchain.pem` and `privkey.pem`.
+1.  **Transfer Files**: Copy all files to your VPS folder.
+2.  **Add Certificates**: Place `fullchain.pem` and `privkey.pem` in the `./certs` folder.
+3.  **Build Images**:
+    ```bash
+    docker-compose -f docker-compose.vps.yml build
+    ```
+4.  **Start Services**:
+    ```bash
+    docker-compose -f docker-compose.vps.yml up -d
+    ```
 
-## Isolated Network Strategy
-We will name the network `aureeq-net` and ensure container names are prefixed with `aureeq-`.
+## 🛠 Troubleshooting
+*   **GPU Error**: If you see `could not select device driver nvidia`, it means your VPS does not have a GPU. I have already commented out the GPU requirement in `docker-compose.vps.yml` to allow it to run on regular CPUs.

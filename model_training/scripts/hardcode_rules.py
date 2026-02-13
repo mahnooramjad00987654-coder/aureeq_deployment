@@ -115,7 +115,7 @@ CATEGORY_MAP = {
 RESP_GREETING = "Hello I am AUREEQ your personal assistant, How may I help you today?"
 RESP_IDENTITY = "I am AUREEQ, the AI Sales Agent for IYI Dining. We offer a variety of delicious dishes. How can I help you with our menu today?"
 # Updated with clean link format
-RESP_RESERVATION = "I can assist you with making a reservation at our restaurant. For reservations, please call +44 20 1234 5678 or email info@iyirestaurant.co.uk.\n\nFollow [IYI Dining on Instagram](https://www.instagram.com/iyi_dining?igsh=bDBtc2N5amtmajhj) to stay updated."
+RESP_RESERVATION = "I can assist you with making a reservation at our restaurant. For reservations, please call +44 20 1234 5678 or email info@iyirestaurant.co.uk.\n\nFollow [@iyi_dining on Instagram](https://www.instagram.com/iyi_dining?igsh=bDBtc2N5amtmajhj) to stay updated."
 RESP_NON_FOOD = "Sorry, I am only able to help you with your food selections."
 RESP_ADD_TO_CART_SUCCESS = "Excellent choice. I have added {name} to your cart. [ORDER: {name} | {price}]"
 RESP_ADD_TO_CART_FAIL = "I'd love to add that for you, but I'm not sure which item you mean. Could you say the name exactly as it appears on the menu?"

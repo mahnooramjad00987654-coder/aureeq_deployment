@@ -36,13 +36,14 @@ services:
       context: .
       dockerfile: Dockerfile.ollama
     container_name: aureeq-ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [ gpu ]
+    # GPU reservation removed for standard VPS compatibility
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [ gpu ]
     volumes:
       - ollama_storage:/root/.ollama
     networks:
