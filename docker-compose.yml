@@ -1,12 +1,13 @@
 services:
   aureeq-proxy:
-    image: nginx:stable-alpine
-    container_name: aureeq-proxy
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    image: aureeq-proxy:latest
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs:/etc/nginx/ssl:ro
     depends_on:
       - aureeq-frontend
@@ -20,7 +21,6 @@ services:
       context: .
       dockerfile: Dockerfile.backend
     image: aureeq-backend:latest
-    container_name: aureeq-backend
     environment:
       - OLLAMA_HOST=http://aureeq-ai:11434
       - OPENAI_API_KEY=${OPENAI_API_KEY}
@@ -38,7 +38,6 @@ services:
       context: .
       dockerfile: Dockerfile.ollama
     image: aureeq-ai:latest
-    container_name: aureeq-ai
     volumes:
       - ollama_storage:/root/.ollama
     networks:
@@ -50,7 +49,6 @@ services:
       context: .
       dockerfile: Dockerfile.frontend
     image: aureeq-frontend:latest
-    container_name: aureeq-frontend
     networks:
       - aureeq-net
     restart: always
