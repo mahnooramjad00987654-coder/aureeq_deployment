@@ -8,6 +8,8 @@ If your VPS already has other containers running (e.g., Nginx Proxy Manager, Tra
 
 ## 🚀 Step-by-Step Launch (Standard)
 
+**NOTE:** To avoid conflicts with existing websites on your VPS, AUREEQ now runs on port **8080** (HTTP) and **8443** (HTTPS).
+
 1.  **Transfer Files**: Copy all files to your VPS folder.
 2.  **Add Certificates**: Place `fullchain.pem` and `privkey.pem` in the `./certs` folder.
 3.  **Set Environment Variables**: Create a `.env` file and add your `OPENAI_API_KEY`.
@@ -15,7 +17,8 @@ If your VPS already has other containers running (e.g., Nginx Proxy Manager, Tra
     ```bash
     docker-compose up -d --build
     ```
+5.  **Access**: Open `http://your-vps-ip:8080` in your browser.
 
 ## 🛠 Troubleshooting
+*   **"Bind: address already in use"**: This means something is already blocked on port 80/443. I have fixed this by moving AUREEQ to 8080/8443.
 *   **GPU Error**: GPU reservations have been removed. AUREEQ will run on your CPU.
-*   **Port Conflicts**: If port 80/443 is used, disable the `proxy` service in `docker-compose.yml` and use your own Nginx/Caddy.

@@ -5,8 +5,8 @@ services:
       dockerfile: Dockerfile.proxy
     image: aureeq-proxy:latest
     ports:
-      - "80:80"
-      - "443:443"
+      - "8080:80"
+      - "8443:443"
     volumes:
       - ./certs:/etc/nginx/ssl:ro
     depends_on:
