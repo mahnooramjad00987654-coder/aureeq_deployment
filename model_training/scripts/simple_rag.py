@@ -91,7 +91,9 @@ class SimpleExampleRAG:
             result_str = ""
             for idx in top_indices:
                 u, a = self.examples[idx]
-                result_str += f'User: "{u}"\nAgent: "{a}"\n'
+                # Return only the agent's response to keep the LLM focused on style, 
+                # not the meta-labels like "User:" and "Agent:"
+                result_str += f"{a}\n"
                 
             return result_str.strip()
             
